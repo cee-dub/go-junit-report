@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -18,7 +19,8 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-	report, err := Parse(os.Stdin)
+	tee := io.TeeReader(os.Stdin, os.Stdout)
+	report, err := Parse(tee)
 	if err != nil {
 		return
 	}
