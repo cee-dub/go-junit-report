@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -9,47 +8,46 @@ import (
 	"strings"
 )
 
-type JUnitTestSuites struct {
-	XMLName    xml.Name `xml:"testsuites"`
-	TestSuites []JUnitTestSuite
-}
+// Types defining XML output compatible with the format described at
+// http://windyroad.org/dl/Open%20Source/JUnit.xsd
+type (
+	JUnitTestSuite struct {
+		XMLName    xml.Name        `xml:"testsuite"`
+		Tests      int             `xml:"tests,attr"`
+		Failures   int             `xml:"failures,attr"`
+		Skips      int             `xml:"skips,attr"`
+		Time       string          `xml:"time,attr"`
+		Name       string          `xml:"name,attr"`
+		Properties []JUnitProperty `xml:"properties>property,omitempty"`
+		TestCases  []JUnitTestCase
+	}
 
-type JUnitTestSuite struct {
-	XMLName    xml.Name        `xml:"testsuite"`
-	Tests      int             `xml:"tests,attr"`
-	Failures   int             `xml:"failures,attr"`
-	Skips      int             `xml:"skips,attr"`
-	Time       string          `xml:"time,attr"`
-	Name       string          `xml:"name,attr"`
-	Properties []JUnitProperty `xml:"properties>property,omitempty"`
-	TestCases  []JUnitTestCase
-}
+	JUnitTestCase struct {
+		XMLName   xml.Name      `xml:"testcase"`
+		Classname string        `xml:"classname,attr"`
+		Name      string        `xml:"name,attr"`
+		Time      string        `xml:"time,attr"`
+		Failure   *JUnitFailure `xml:"failure,omitempty"`
+		Skip      *JUnitSkip    `xml:"skipped,omitempty"`
+	}
 
-type JUnitTestCase struct {
-	XMLName   xml.Name      `xml:"testcase"`
-	Classname string        `xml:"classname,attr"`
-	Name      string        `xml:"name,attr"`
-	Time      string        `xml:"time,attr"`
-	Failure   *JUnitFailure `xml:"failure,omitempty"`
-	Skip      *JUnitSkip    `xml:"skipped,omitempty"`
-}
+	JUnitProperty struct {
+		Name  string `xml:"name,attr"`
+		Value string `xml:"value,attr"`
+	}
 
-type JUnitProperty struct {
-	Name  string `xml:"name,attr"`
-	Value string `xml:"value,attr"`
-}
+	JUnitFailure struct {
+		Message  string `xml:"message,attr"`
+		Type     string `xml:"type,attr"`
+		Contents string `xml:",chardata"`
+	}
 
-type JUnitFailure struct {
-	Message  string `xml:"message,attr"`
-	Type     string `xml:"type,attr"`
-	Contents string `xml:",chardata"`
-}
-
-type JUnitSkip struct {
-	Message  string `xml:"message,attr"`
-	Type     string `xml:"type,attr"`
-	Contents string `xml:",chardata"`
-}
+	JUnitSkip struct {
+		Message  string `xml:"message,attr"`
+		Type     string `xml:"type,attr"`
+		Contents string `xml:",chardata"`
+	}
+)
 
 func NewJUnitProperty(name, value string) JUnitProperty {
 	return JUnitProperty{
@@ -58,89 +56,62 @@ func NewJUnitProperty(name, value string) JUnitProperty {
 	}
 }
 
-// JUnitReportXML writes a junit xml representation of the given report to w
-// in the format described at http://windyroad.org/dl/Open%20Source/JUnit.xsd
-func JUnitReportXML(report *Report, w io.Writer) error {
-	suites := JUnitTestSuites{}
+// JUnitReportXML writes a junit xml representation of the given report to w, including an
+// XML header.
+func JUnitReportXML(pkg Package, w io.Writer) error {
+	ts := JUnitTestSuite{
+		Tests:      len(pkg.Tests),
+		Time:       fmtDur(pkg.Time),
+		Name:       pkg.Name,
+		Properties: []JUnitProperty{NewJUnitProperty("go.version", runtime.Version())},
+	}
 
-	// convert Report to JUnit test suites
-	for _, pkg := range report.Packages {
-		ts := JUnitTestSuite{
-			Tests:      len(pkg.Tests),
-			Failures:   0,
-			Time:       formatTime(pkg.Time),
-			Name:       pkg.Name,
-			Properties: []JUnitProperty{},
-			TestCases:  []JUnitTestCase{},
+	// individual test cases
+	for _, test := range pkg.Tests {
+		testCase := JUnitTestCase{
+			Classname: shortName(pkg.Name),
+			Name:      test.Name,
+			Time:      fmtDur(test.Time),
 		}
-
-		classname := pkg.Name
-		if idx := strings.LastIndex(classname, "/"); idx > -1 && idx < len(pkg.Name) {
-			classname = pkg.Name[idx+1:]
-		}
-
-		// properties
-		ts.Properties = append(ts.Properties, NewJUnitProperty("go.version", runtime.Version()))
-
-		// individual test cases
-		for _, test := range pkg.Tests {
-			testCase := JUnitTestCase{
-				Classname: classname,
-				Name:      test.Name,
-				Time:      formatTime(test.Time),
-				Failure:   nil,
-				Skip:      nil,
+		switch test.Result {
+		case FAIL:
+			ts.Failures++
+			testCase.Failure = &JUnitFailure{
+				Message:  "Failed",
+				Contents: strings.Join(test.Output, "\n"),
 			}
-			switch test.Result {
-			case FAIL:
-				ts.Failures += 1
-
-				testCase.Failure = &JUnitFailure{
-					Message:  "Failed",
-					Type:     "",
-					Contents: strings.Join(test.Output, "\n"),
-				}
-			case SKIP:
-				ts.Skips += 1
-
-				testCase.Skip = &JUnitSkip{
-					Message:  "Skipped",
-					Type:     "",
-					Contents: strings.Join(test.Output, "\n"),
-				}
-
+		case SKIP:
+			ts.Skips++
+			testCase.Skip = &JUnitSkip{
+				Message:  "Skipped",
+				Contents: strings.Join(test.Output, "\n"),
 			}
 
-			ts.TestCases = append(ts.TestCases, testCase)
 		}
 
-		suites.TestSuites = append(suites.TestSuites, ts)
+		ts.TestCases = append(ts.TestCases, testCase)
 	}
 
-	// to xml
-	bytes, err := xml.MarshalIndent(suites, "", "\t")
-	if err != nil {
-		return err
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "\t")
+	if _, err := w.Write([]byte(xml.Header)); err != nil {
+		return fmt.Errorf("writing xml header: %s", err)
 	}
-
-	writer := bufio.NewWriter(w)
-	writer.WriteString(xml.Header[:len(xml.Header)])
-	writer.Write(bytes)
-	writer.WriteByte('\n')
-	writer.Flush()
-
-	return nil
+	if err := enc.Encode(ts); err != nil {
+		return fmt.Errorf("writing xml: %s", err)
+	}
+	_, err := w.Write([]byte("\n"))
+	return err
 }
 
-func countFailures(tests []Test) (result int) {
-	for _, test := range tests {
-		if test.Result == FAIL {
-			result += 1
-		}
-	}
-	return
-}
-
-func formatTime(time int) string {
+func fmtDur(time int) string {
 	return fmt.Sprintf("%.3f", float64(time)/1000.0)
+}
+
+// shortname truncates name to the last element after a '/', if one occurs.
+func shortName(name string) string {
+	if idx := strings.LastIndex(name, "/"); idx > -1 && idx < len(name) {
+		name = name[idx+1:]
+	}
+	return name
 }

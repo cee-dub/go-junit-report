@@ -155,12 +155,14 @@ func TestJUnitFormatter(t *testing.T) {
 
 		var junitReport bytes.Buffer
 
-		if err = JUnitReportXML(testCase.report, &junitReport); err != nil {
-			t.Fatal(err)
-		}
+		for _, pkg := range testCase.report.Packages {
+			if err = JUnitReportXML(pkg, &junitReport); err != nil {
+				t.Fatal(err)
+			}
 
-		if string(junitReport.Bytes()) != report {
-			t.Fatalf("Report xml ==\n%s, want\n%s\n", string(junitReport.Bytes()), report)
+			if string(junitReport.Bytes()) != report {
+				t.Fatalf("Report xml ==\n%s, want\n%s\n", string(junitReport.Bytes()), report)
+			}
 		}
 	}
 }
